@@ -12,16 +12,15 @@ const port = 9000;
 const client = new MongoClient(
   `mongodb://${process.env.MONGO_USER_URI}:${process.env.MONGO_PASSWORD_URI}@ac-myrwp58-shard-00-00.qzhspai.mongodb.net:27017,ac-myrwp58-shard-00-01.qzhspai.mongodb.net:27017,ac-myrwp58-shard-00-02.qzhspai.mongodb.net:27017/?ssl=true&replicaSet=atlas-xhguby-shard-0&authSource=admin`,
 );
-console.log(process.env.MONGO_USER_URI);
-console.log(process.env.MONGO_PASSWORD_URI);
 
 export async function connectToMongoDB() {
   try {
     await client.connect();
     console.log("You successfully connected to MongoDB!");
     return client;
-  } catch (err) {
-    console.dir(err);
+  } catch (error) {
+    console.error("MongoDB Connection Error:", error);
+    throw error;
   }
 }
 
@@ -32,27 +31,51 @@ const MyEvents = user.collection("MyEvents");
 
 //http://localhost:3000/createEvent
 
+// Better Auth JWKS
+const JWKS = createRemoteJWKSet(
+  new URL(`${process.env.LOCAL_URL}/api/auth/jwks`),
+);
+
 const varifyUser = async (req, res, next) => {
-  const authorizer = req.headers.authorization;
-  console.log(authorizer);
-  const token = authorizer.split(" ")[1];
-  console.log(token);
-  if (!token) {
-    return res.status(401).send({ msg: "unAthorizer" });
-  }
-
-  const jwks = createRemoteJWKSet(
-    new URL(`${process.env.LOCAL_URL}/api/auth/jwks`),
-  );
-
   try {
-    const { payload } = await jwtVerify(token, jwks);
-    console.log(payload)
+    const authorization = req.headers.authorization;
+
+    // Authorization header আছে কি না
+    if (!authorization || !authorization.startsWith("Bearer ")) {
+      return res.status(401).send({
+        success: false,
+        message: "Authorization token is missing!",
+      });
+    }
+
+    // Bearer token আলাদা করা
+    const token = authorization.split(" ")[1];
+
+    if (!token) {
+      return res.status(401).send({
+        success: false,
+        message: "Token is missing!",
+      });
+    }
+
+    // Token verify
+    const { payload } = await jwtVerify(token, JWKS);
+
+    // পরবর্তী route-এ user information পাওয়া যাবে
+    req.user = payload;
+
     next();
-  } catch (err) {
-    return res.status(500).send({ msg: "Server Error!" });
+  } catch (error) {
+    // আসল error শুধু backend terminal-এ দেখাবে
+    console.error("Authentication Error:", error);
+
+    return res.status(401).send({
+      success: false,
+      message: "Invalid or expired token!",
+    });
   }
 };
+
 
 //all get data
 app.get("/createEvent", async (req, res) => {
@@ -61,7 +84,7 @@ app.get("/createEvent", async (req, res) => {
 });
 
 // search filter data
-app.get("/event/search",varifyUser, async (req, res) => {
+app.get("/event/search", async (req, res) => {
   try {
     const { search, category } = req.query;
     let query = {};
@@ -85,24 +108,45 @@ app.get("/getData-6", async (req, res) => {
 });
 
 // my event  data
-app.get("/myCreateEvent/:email",varifyUser, async (req, res) => {
-  const { email } = req.params;
-  const result = await users
-    .find({ email: email })
-    .sort({ eventDate: 1 })
-    .toArray();
-  res.send(result);
-});
+app.get("/myCreateEvent/:email",  async (req, res) => {
+  try {
+    const { email } = req.params;
 
+    const result = await users
+      .find({ email })
+      .sort({ eventDate: 1 })
+      .toArray();
+
+    res.status(200).send(result);
+  } catch (error) {
+    console.error("My Created Events Error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to fetch created events",
+    });
+  }
+});
 // join event data show
-app.get("/joinEvent/:email",varifyUser, async (req, res) => {
-  const { email } = req.params;
-  const result = await MyEvents.find({ email: email })
-    .sort({ eventDate: 1 })
-    .toArray();
-  res.send(result);
-});
+app.get("/joinEvent/:email", varifyUser, async (req, res) => {
+  try {
+    const { email } = req.params;
 
+    const result = await MyEvents
+      .find({ email })
+      .sort({ eventDate: 1 })
+      .toArray();
+
+    res.status(200).send(result);
+  } catch (error) {
+    console.error("Joined Events Error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to fetch joined events",
+    });
+  }
+});
 // join event data
 app.post("/joinEvents",varifyUser, async (req, res) => {
   try {
@@ -144,12 +188,37 @@ app.post("/joinEvents",varifyUser, async (req, res) => {
 
 // single page data
 app.get("/single-id/:id", varifyUser, async (req, res) => {
-  const id = req.params.id;
-  const query = { _id: new ObjectId(id) };
-  const result = await users.findOne(query);
-  res.send(result);
-});
+  try {
+    const { id } = req.params;
 
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        success: false,
+        message: "Invalid event ID",
+      });
+    }
+
+    const result = await users.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!result) {
+      return res.status(404).send({
+        success: false,
+        message: "Event not found",
+      });
+    }
+
+    res.status(200).send(result);
+  } catch (error) {
+    console.error("Single Event Error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to fetch event",
+    });
+  }
+});
 // create event data
 app.post("/createEvent",varifyUser, async (req, res) => {
   const data = req.body;
